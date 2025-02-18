@@ -46,7 +46,27 @@ jobs:
     - name: Create output directory
       run: mkdir -p ./output
 
+    - name: Check if input is an image
+      id: check_input
+      run: |
+        FILE_NAME="${{ github.event.inputs.input_file }}"
+        FILE_EXT=$(echo "$FILE_NAME" | awk -F. '{if (NF>1) {print $NF}}' | tr '[:upper:]' '[:lower:]')  # Ensure the extension is lowercase
+        echo "File extension: $FILE_EXT"
+        if [[ "$FILE_EXT" =~ ^(jpg|jpeg|png|tiff|bmp)$ ]]; then
+          echo "Input is an image: $FILE_NAME"
+          echo "is_image=true" >> $GITHUB_ENV  
+        else
+          echo "Input is not an image"
+          echo "is_image=false" >> $GITHUB_ENV
+        fi
+
+    - name: Process image
+      if: env.is_image == 'true'
+      run: |
+        tesseract ${{ github.event.inputs.additional_param }} "./input/${{ github.event.inputs.input_file }}" "./output/output_$(date +"%Y%m%d_%H%M%S")" pdf txt
+        
     - name: Process PDF
+      if: env.is_image == 'false'
       run: |
         ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean --sidecar "./output/output_$(date +"%Y%m%d_%H%M%S").txt" "./input/${{ github.event.inputs.input_file }}" "./output/output_$(date +"%Y%m%d_%H%M%S").pdf"
 
@@ -66,5 +86,5 @@ jobs:
         git config --local user.name "github-actions"
         git config --local user.email "github-actions@github.com"
         git add "./input/${{ github.event.inputs.input_file }}"
-        git commit -m "Delete input file: ${{ github.event.inputs.input_file }}"
+        git commit -m "Delete input file"
         git push
