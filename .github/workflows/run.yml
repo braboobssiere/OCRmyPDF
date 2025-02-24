@@ -21,9 +21,6 @@ permissions:
 jobs:
   process_files:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        file: ${{ steps.get-files.outputs.file_list }}
     env:
       INPUT_DIR: ./input
       OUTPUT_DIR: ./output
@@ -37,42 +34,59 @@ jobs:
       run: |
         case "${{ github.event.inputs.file_type }}" in
           pdf)
-            files=$(find $INPUT_DIR -maxdepth 1 -iname '*.pdf' -printf '%f\n')
+            find $INPUT_DIR -maxdepth 1 -iname '*.pdf' -printf '%f\n' > filelist.txt
             ;;
           image)
-            files=$(find $INPUT_DIR -maxdepth 1 \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.tiff' -o -iname '*.bmp' \) -printf '%f\n')
+            find $INPUT_DIR -maxdepth 1 \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.tiff' -o -iname '*.bmp' \) -printf '%f\n' > filelist.txt
             ;;
         esac
-        echo "file_list=${files}" >> $GITHUB_OUTPUT
+        echo "files=$(base64 -w0 filelist.txt)" >> $GITHUB_OUTPUT
 
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y ocrmypdf
-        # Tesseract language handling remains similar to original
+        # Keep original language handling logic
 
     - name: Create output directory
       run: mkdir -p $OUTPUT_DIR
 
-    - name: Process file
+    - name: Process files
+      env:
+        FILE_LIST: ${{ steps.get-files.outputs.files }}
       run: |
-        filename="${{ matrix.file }}"
-        ext="${filename##*.}"
-        timestamp=$(date +"%Y%m%d_%H%M%S")
-        base="${filename%.*}"
+        echo "$FILE_LIST" | base64 --decode > filelist.txt
+        while IFS= read -r filename; do
+          [ -z "$filename" ] && continue
+          
+          ext="${filename##*.}"
+          timestamp=$(date +"%Y%m%d_%H%M%S")
+          base="${filename%.*}"
 
-        case "${{ github.event.inputs.file_type }}" in
-          pdf)
-            ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean \
-              --sidecar "$OUTPUT_DIR/${base}_${timestamp}.txt" \
-              "$INPUT_DIR/$filename" "$OUTPUT_DIR/${base}_${timestamp}.pdf"
-            ;;
-          image)
-            lower_ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
-            tesseract ${{ github.event.inputs.additional_param }} "$INPUT_DIR/$filename" \
-              "$OUTPUT_DIR/${base}_${timestamp}" pdf txt
-            ;;
-        esac
+          case "${{ github.event.inputs.file_type }}" in
+            pdf)
+              ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean \
+                --sidecar "$OUTPUT_DIR/${base}_${timestamp}.txt" \
+                "$INPUT_DIR/$filename" "$OUTPUT_DIR/${base}_${timestamp}.pdf"
+              ;;
+            image)
+              tesseract ${{ github.event.inputs.additional_param }} "$INPUT_DIR/$filename" \
+                "$OUTPUT_DIR/${base}_${timestamp}" pdf txt
+              ;;
+          esac
+
+          # Cleanup processed file
+          git rm "$INPUT_DIR/$filename"
+          rm -f "$INPUT_DIR/$filename"
+        done < filelist.txt
+
+    - name: Commit changes
+      run: |
+        git config --local user.name "github-actions"
+        git config --local user.email "github-actions@github.com"
+        git add -A
+        git commit -m "Processed ${{ github.event.inputs.file_type }} files"
+        git push
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -80,16 +94,3 @@ jobs:
         name: processed-files
         path: $OUTPUT_DIR/*
         retention-days: 7
-
-    - name: Cleanup processed files
-      run: |
-        git rm "$INPUT_DIR/${{ matrix.file }}"
-        rm -f "$INPUT_DIR/${{ matrix.file }}"
-
-    - name: Commit changes
-      run: |
-        git config --local user.name "github-actions"
-        git config --local user.email "github-actions@github.com"
-        git add -A
-        git commit -m "Processed ${{ matrix.file }}"
-        git push
