@@ -1,15 +1,8 @@
-name: Batch File Processing with OCR
+name: Process Multiple Files with OCRmyPDF
 
 on:
   workflow_dispatch:
     inputs:
-      file_type:
-        description: 'Choose file type to process (PDF or Image)'
-        required: true
-        type: choice
-        options:
-          - pdf
-          - image
       additional_param:
         description: 'Additional OCR parameters'
         required: false
@@ -29,80 +22,65 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Get file list
-      id: get-files
-      run: |
-        case "${{ github.event.inputs.file_type }}" in
-          pdf)
-            find $INPUT_DIR -maxdepth 1 -iname '*.pdf' -printf '%f\n' > filelist.txt
-            ;;
-          image)
-            find $INPUT_DIR -maxdepth 1 \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.tiff' -o -iname '*.bmp' \) -printf '%f\n' > filelist.txt
-            ;;
-        esac
-        echo "files=$(base64 -w0 filelist.txt)" >> $GITHUB_OUTPUT
-
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y ocrmypdf tesseract-ocr
-        
-        # Language installation logic
+        # Language installation
         lang_codes=$(echo "${{ github.event.inputs.additional_param }}" | sed -n 's/.*-l[[:space:]]*\([a-zA-Z]\{3\}\([+][a-zA-Z]\{3\}\)*\)\b.*/\1/p')
         if [ -n "$lang_codes" ]; then
           for lang_code in $(echo "$lang_codes" | tr '+' ' '); do
-            if [ "$lang_code" = "eng" ]; then
-              continue
-            fi
+            [ "$lang_code" = "eng" ] && continue
             sudo apt-get install -y "tesseract-ocr-$lang_code"
           done
         fi
 
+    - name: Prepare directories
+      run: |
+        mkdir -p $OUTPUT_DIR
+        [ -d $INPUT_DIR ] || mkdir $INPUT_DIR
+
     - name: Process files
-      env:
-        FILE_LIST: ${{ steps.get-files.outputs.files }}
       run: |
         set -eo pipefail
-        echo "$FILE_LIST" | base64 --decode > filelist.txt
-        
-        while IFS= read -r filename; do
-          [ -z "$filename" ] && continue
+        while IFS= read -rd '' file; do
+          filename=$(basename "$file")
+          extension="${filename##*.}"
+          success=false
 
-          # Find exact filename with case matching
-          original_file=$(find "$INPUT_DIR" -maxdepth 1 -iname "$filename" -print -quit)
-          [ ! -f "$original_file" ] && { echo "File not found: $filename"; continue; }
+          # Process images
+          if [[ "${extension,,}" =~ ^(jpg|jpeg|png|tiff|bmp)$ ]]; then
+            output_base="$OUTPUT_DIR/${filename%.*}_$(date +"%Y%m%d_%H%M%S")"
+            if tesseract ${{ github.event.inputs.additional_param }} "$file" "$output_base" pdf txt; then
+              success=true
+            fi
 
-          base_name=$(basename "$original_file")
-          clean_base="${base_name%.*}"
-          timestamp=$(date +"%Y%m%d_%H%M%S")
+          # Process PDFs
+          elif [[ "${extension,,}" == "pdf" ]]; then
+            output_pdf="$OUTPUT_DIR/${filename%.*}_$(date +"%Y%m%d_%H%M%S").pdf"
+            if ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean \
+              --sidecar "${output_pdf}.txt" "$file" "$output_pdf"; then
+              success=true
+            fi
+          fi
 
-          case "${{ github.event.inputs.file_type }}" in
-            pdf)
-              ocrmypdf ${{ github.event.inputs.additional_param }} \
-                --skip-text --clean \
-                --output-type pdfa-2 \
-                --quiet \
-                --sidecar "$OUTPUT_DIR/${clean_base}_${timestamp}.txt" \
-                "$original_file" "$OUTPUT_DIR/${clean_base}_${timestamp}.pdf"
-              ;;
-            image)
-              tesseract ${{ github.event.inputs.additional_param }} \
-                "$original_file" "$OUTPUT_DIR/${clean_base}_${timestamp}" pdf txt
-              ;;
-          esac
-
-          # Force remove with exact filename case
-          git rm -f --ignore-unmatch "$original_file"
-          rm -f "$original_file"
-          echo "Processed: $original_file → $OUTPUT_DIR/${clean_base}_${timestamp}.*"
-        done < filelist.txt
+          # Remove only successfully processed files
+          if [ "$success" = true ]; then
+            git rm -f "$file"
+            rm -f "$file"
+            echo "Processed: $filename"
+          else
+            echo "Skipping: $filename"
+          fi
+        done < <(find $INPUT_DIR -type f \( -iname '*.pdf' -o -iname '*.jpg' -o -iname '*.jpeg' \
+          -o -iname '*.png' -o -iname '*.tiff' -o -iname '*.bmp' \) -print0)
 
     - name: Commit changes
       run: |
         git config --local user.name "github-actions"
         git config --local user.email "github-actions@github.com"
         git add -A
-        git commit -m "Processed ${{ github.event.inputs.file_type }} files" || echo "No changes to commit"
+        git commit -m "Processed files" || echo "No changes to commit"
         git push
 
     - name: Upload artifacts
