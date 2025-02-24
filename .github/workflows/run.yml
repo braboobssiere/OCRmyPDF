@@ -75,22 +75,22 @@ jobs:
         done < <(find $INPUT_DIR -type f \( -iname '*.pdf' -o -iname '*.jpg' -o -iname '*.jpeg' \
           -o -iname '*.png' -o -iname '*.tiff' -o -iname '*.bmp' \) -print0)
 
-    - name: Verify output files
-      run: |
-        echo "Generated output files:"
-        ls -la $OUTPUT_DIR
-
-    - name: Commit changes
-      run: |
-        git config --local user.name "github-actions"
-        git config --local user.email "github-actions@github.com"
-        git add -A
-        git commit -m "Processed files" || echo "No changes to commit"
-        git push
-
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: processed-files
         path: ${{ env.OUTPUT_DIR }}/
         retention-days: 7
+
+    - name: Delete output directory
+      run: |
+        echo "Removing output directory..."
+        rm -rf $OUTPUT_DIR
+
+    - name: Commit changes
+      run: |
+        git config --local user.name "github-actions"
+        git config --local user.email "github-actions@github.com"
+        git add -A
+        git commit -m "Processed files [output removed]" || echo "No changes to commit"
+        git push
