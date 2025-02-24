@@ -47,63 +47,54 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y ocrmypdf tesseract-ocr
         
-        # language installation 
+        # Language installation logic
         lang_codes=$(echo "${{ github.event.inputs.additional_param }}" | sed -n 's/.*-l[[:space:]]*\([a-zA-Z]\{3\}\([+][a-zA-Z]\{3\}\)*\)\b.*/\1/p')
         if [ -n "$lang_codes" ]; then
           for lang_code in $(echo "$lang_codes" | tr '+' ' '); do
             if [ "$lang_code" = "eng" ]; then
-              echo "Skipping language code 'eng'"
               continue
             fi
-            echo "Installing Tesseract package for language: $lang_code"
             sudo apt-get install -y "tesseract-ocr-$lang_code"
           done
-        else
-          echo "No language codes found after -l flag."
         fi
-
-    - name: Create output directory
-      run: mkdir -p $OUTPUT_DIR
 
     - name: Process files
       env:
         FILE_LIST: ${{ steps.get-files.outputs.files }}
       run: |
+        set -eo pipefail
         echo "$FILE_LIST" | base64 --decode > filelist.txt
         
         while IFS= read -r filename; do
           [ -z "$filename" ] && continue
 
-          echo "Processing: $filename"
-          base="${filename%.*}"
-          ext="${filename##*.}"
-          timestamp=$(date +"%Y%m%d_%H%M%S")
+          # Find exact filename with case matching
+          original_file=$(find "$INPUT_DIR" -maxdepth 1 -iname "$filename" -print -quit)
+          [ ! -f "$original_file" ] && { echo "File not found: $filename"; continue; }
 
-          if [ ! -f "$INPUT_DIR/$filename" ]; then
-            echo "File not found: $filename"
-            continue
-          fi
+          base_name=$(basename "$original_file")
+          clean_base="${base_name%.*}"
+          timestamp=$(date +"%Y%m%d_%H%M%S")
 
           case "${{ github.event.inputs.file_type }}" in
             pdf)
-              ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean \
-                --sidecar "$OUTPUT_DIR/${base}_${timestamp}.txt" \
-                "$INPUT_DIR/$filename" "$OUTPUT_DIR/${base}_${timestamp}.pdf"
+              ocrmypdf ${{ github.event.inputs.additional_param }} \
+                --skip-text --clean \
+                --output-type pdfa-2 \
+                --quiet \
+                --sidecar "$OUTPUT_DIR/${clean_base}_${timestamp}.txt" \
+                "$original_file" "$OUTPUT_DIR/${clean_base}_${timestamp}.pdf"
               ;;
             image)
               tesseract ${{ github.event.inputs.additional_param }} \
-                "$INPUT_DIR/$filename" "$OUTPUT_DIR/${base}_${timestamp}" pdf txt
+                "$original_file" "$OUTPUT_DIR/${clean_base}_${timestamp}" pdf txt
               ;;
           esac
 
-          if [ $? -eq 0 ]; then
-            git rm "$INPUT_DIR/$filename"
-            rm -f "$INPUT_DIR/$filename"
-            echo "Successfully processed: $filename"
-          else
-            echo "Error processing: $filename"
-            exit 1
-          fi
+          # Force remove with exact filename case
+          git rm -f --ignore-unmatch "$original_file"
+          rm -f "$original_file"
+          echo "Processed: $original_file → $OUTPUT_DIR/${clean_base}_${timestamp}.*"
         done < filelist.txt
 
     - name: Commit changes
@@ -111,7 +102,7 @@ jobs:
         git config --local user.name "github-actions"
         git config --local user.email "github-actions@github.com"
         git add -A
-        git commit -m "Processed ${{ github.event.inputs.file_type }} files"
+        git commit -m "Processed ${{ github.event.inputs.file_type }} files" || echo "No changes to commit"
         git push
 
     - name: Upload artifacts
