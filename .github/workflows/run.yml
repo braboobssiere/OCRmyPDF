@@ -26,7 +26,6 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y ocrmypdf tesseract-ocr
-        # Language installation
         lang_codes=$(echo "${{ github.event.inputs.additional_param }}" | sed -n 's/.*-l[[:space:]]*\([a-zA-Z]\{3\}\([+][a-zA-Z]\{3\}\)*\)\b.*/\1/p')
         if [ -n "$lang_codes" ]; then
           for lang_code in $(echo "$lang_codes" | tr '+' ' '); do
@@ -47,33 +46,39 @@ jobs:
           filename=$(basename "$file")
           extension="${filename##*.}"
           success=false
+          timestamp=$(date +"%Y%m%d_%H%M%S")
 
           # Process images
           if [[ "${extension,,}" =~ ^(jpg|jpeg|png|tiff|bmp)$ ]]; then
-            output_base="$OUTPUT_DIR/${filename%.*}_$(date +"%Y%m%d_%H%M%S")"
+            output_base="$OUTPUT_DIR/${filename%.*}_$timestamp"
             if tesseract ${{ github.event.inputs.additional_param }} "$file" "$output_base" pdf txt; then
               success=true
             fi
 
           # Process PDFs
           elif [[ "${extension,,}" == "pdf" ]]; then
-            output_pdf="$OUTPUT_DIR/${filename%.*}_$(date +"%Y%m%d_%H%M%S").pdf"
+            output_pdf="$OUTPUT_DIR/${filename%.*}_$timestamp.pdf"
             if ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean \
               --sidecar "${output_pdf}.txt" "$file" "$output_pdf"; then
               success=true
             fi
           fi
 
-          # Remove only successfully processed files
           if [ "$success" = true ]; then
-            git rm -f "$file"
+            # Remove original file from both filesystem and git index
+            git rm -f --ignore-unmatch "$file"
             rm -f "$file"
             echo "Processed: $filename"
           else
-            echo "Skipping: $filename"
+            echo "Skipped: $filename"
           fi
         done < <(find $INPUT_DIR -type f \( -iname '*.pdf' -o -iname '*.jpg' -o -iname '*.jpeg' \
           -o -iname '*.png' -o -iname '*.tiff' -o -iname '*.bmp' \) -print0)
+
+    - name: Verify output files
+      run: |
+        echo "Generated output files:"
+        ls -la $OUTPUT_DIR
 
     - name: Commit changes
       run: |
@@ -87,5 +92,5 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: processed-files
-        path: $OUTPUT_DIR/*
+        path: ${{ env.OUTPUT_DIR }}/
         retention-days: 7
