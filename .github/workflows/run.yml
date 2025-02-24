@@ -1,17 +1,17 @@
-name: Batch Process Files with OCR
+name: Batch File Processing with OCR
 
 on:
   workflow_dispatch:
     inputs:
       file_type:
-        description: 'Choose file type to process'
+        description: 'Choose file type to process (PDF or Image)'
         required: true
         type: choice
         options:
           - pdf
           - image
-      additional_param:  
-        description: 'Additional parameter(s)'
+      additional_param:
+        description: 'Additional OCR parameters'
         required: false
         default: -l tha+eng
 
@@ -29,7 +29,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Get files to process
+    - name: Get file list
       id: get-files
       run: |
         case "${{ github.event.inputs.file_type }}" in
@@ -45,8 +45,22 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ocrmypdf
-        # Keep original language handling logic
+        sudo apt-get install -y ocrmypdf tesseract-ocr
+        
+        # language installation 
+        lang_codes=$(echo "${{ github.event.inputs.additional_param }}" | sed -n 's/.*-l[[:space:]]*\([a-zA-Z]\{3\}\([+][a-zA-Z]\{3\}\)*\)\b.*/\1/p')
+        if [ -n "$lang_codes" ]; then
+          for lang_code in $(echo "$lang_codes" | tr '+' ' '); do
+            if [ "$lang_code" = "eng" ]; then
+              echo "Skipping language code 'eng'"
+              continue
+            fi
+            echo "Installing Tesseract package for language: $lang_code"
+            sudo apt-get install -y "tesseract-ocr-$lang_code"
+          done
+        else
+          echo "No language codes found after -l flag."
+        fi
 
     - name: Create output directory
       run: mkdir -p $OUTPUT_DIR
@@ -56,12 +70,19 @@ jobs:
         FILE_LIST: ${{ steps.get-files.outputs.files }}
       run: |
         echo "$FILE_LIST" | base64 --decode > filelist.txt
+        
         while IFS= read -r filename; do
           [ -z "$filename" ] && continue
-          
+
+          echo "Processing: $filename"
+          base="${filename%.*}"
           ext="${filename##*.}"
           timestamp=$(date +"%Y%m%d_%H%M%S")
-          base="${filename%.*}"
+
+          if [ ! -f "$INPUT_DIR/$filename" ]; then
+            echo "File not found: $filename"
+            continue
+          fi
 
           case "${{ github.event.inputs.file_type }}" in
             pdf)
@@ -70,14 +91,19 @@ jobs:
                 "$INPUT_DIR/$filename" "$OUTPUT_DIR/${base}_${timestamp}.pdf"
               ;;
             image)
-              tesseract ${{ github.event.inputs.additional_param }} "$INPUT_DIR/$filename" \
-                "$OUTPUT_DIR/${base}_${timestamp}" pdf txt
+              tesseract ${{ github.event.inputs.additional_param }} \
+                "$INPUT_DIR/$filename" "$OUTPUT_DIR/${base}_${timestamp}" pdf txt
               ;;
           esac
 
-          # Cleanup processed file
-          git rm "$INPUT_DIR/$filename"
-          rm -f "$INPUT_DIR/$filename"
+          if [ $? -eq 0 ]; then
+            git rm "$INPUT_DIR/$filename"
+            rm -f "$INPUT_DIR/$filename"
+            echo "Successfully processed: $filename"
+          else
+            echo "Error processing: $filename"
+            exit 1
+          fi
         done < filelist.txt
 
     - name: Commit changes
