@@ -1,13 +1,10 @@
-name: Process PDF with OCRmyPDF
+name: Process Multiple Files with OCRmyPDF
 
 on:
   workflow_dispatch:
     inputs:
-      input_file:
-        description: 'Input PDF file name from /input/ folder'
-        required: true
-      additional_param:  
-        description: 'Additional parameter(s)'
+      additional_param:
+        description: 'Additional OCR parameters'
         required: false
         default: -l tha+eng
 
@@ -15,76 +12,85 @@ permissions:
   contents: write
 
 jobs:
-  process_pdf:
+  process_files:
     runs-on: ubuntu-latest
+    env:
+      INPUT_DIR: ./input
+      OUTPUT_DIR: ./output
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install OCRmyPDF and Tesseract
+    - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ocrmypdf
-
-        # Extract the language code from the additional_param
+        sudo apt-get install -y ocrmypdf tesseract-ocr
         lang_codes=$(echo "${{ github.event.inputs.additional_param }}" | sed -n 's/.*-l[[:space:]]*\([a-zA-Z]\{3\}\([+][a-zA-Z]\{3\}\)*\)\b.*/\1/p')
         if [ -n "$lang_codes" ]; then
-          # Replace '+' with space and iterate through each language code
           for lang_code in $(echo "$lang_codes" | tr '+' ' '); do
-            if [ "$lang_code" = "eng" ]; then
-              echo "Skipping language code 'eng'"
-              continue
-            fi
-            echo "Installing Tesseract package for language: $lang_code"
+            [ "$lang_code" = "eng" ] && continue
             sudo apt-get install -y "tesseract-ocr-$lang_code"
           done
-        else
-          echo "No language codes found after -l flag."
         fi
 
-    - name: Create output directory
-      run: mkdir -p ./output
-
-    - name: Check if input is an image
-      id: check_input
+    - name: Prepare directories
       run: |
-        FILE_NAME="${{ github.event.inputs.input_file }}"
-        FILE_EXT=$(echo "$FILE_NAME" | awk -F. '{if (NF>1) {print $NF}}' | tr '[:upper:]' '[:lower:]')  # Ensure the extension is lowercase
-        echo "File extension: $FILE_EXT"
-        if [[ "$FILE_EXT" =~ ^(jpg|jpeg|png|tiff|bmp)$ ]]; then
-          echo "Input is an image: $FILE_NAME"
-          echo "is_image=true" >> $GITHUB_ENV  
-        else
-          echo "Input is not an image"
-          echo "is_image=false" >> $GITHUB_ENV
-        fi
+        mkdir -p $OUTPUT_DIR
+        [ -d $INPUT_DIR ] || mkdir $INPUT_DIR
 
-    - name: Process image
-      if: env.is_image == 'true'
+    - name: Process files
       run: |
-        tesseract ${{ github.event.inputs.additional_param }} "./input/${{ github.event.inputs.input_file }}" "./output/output_$(date +"%Y%m%d_%H%M%S")" pdf txt
-        
-    - name: Process PDF
-      if: env.is_image == 'false'
-      run: |
-        ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean --sidecar "./output/output_$(date +"%Y%m%d_%H%M%S").txt" "./input/${{ github.event.inputs.input_file }}" "./output/output_$(date +"%Y%m%d_%H%M%S").pdf"
+        set -eo pipefail
+        while IFS= read -rd '' file; do
+          filename=$(basename "$file")
+          extension="${filename##*.}"
+          success=false
+          timestamp=$(date +"%Y%m%d_%H%M%S")
 
-    - name: Upload output PDF
+          # Process images
+          if [[ "${extension,,}" =~ ^(jpg|jpeg|png|tiff|bmp)$ ]]; then
+            output_base="$OUTPUT_DIR/${filename%.*}_$timestamp"
+            if tesseract ${{ github.event.inputs.additional_param }} "$file" "$output_base" pdf txt; then
+              success=true
+            fi
+
+          # Process PDFs
+          elif [[ "${extension,,}" == "pdf" ]]; then
+            output_pdf="$OUTPUT_DIR/${filename%.*}_$timestamp.pdf"
+            if ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean \
+              --sidecar "${output_pdf}.txt" "$file" "$output_pdf"; then
+              success=true
+            fi
+          fi
+
+          if [ "$success" = true ]; then
+            # Remove original file from both filesystem and git index
+            git rm -f --ignore-unmatch "$file"
+            rm -f "$file"
+            echo "Processed: $filename"
+          else
+            echo "Skipped: $filename"
+          fi
+        done < <(find $INPUT_DIR -type f \( -iname '*.pdf' -o -iname '*.jpg' -o -iname '*.jpeg' \
+          -o -iname '*.png' -o -iname '*.tiff' -o -iname '*.bmp' \) -print0)
+
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: output-pdf
-        path: ./output/*
+        name: processed-files
+        path: ${{ env.OUTPUT_DIR }}/
         retention-days: 7
 
-    - name: Delete input file
+    - name: Delete output directory
       run: |
-        rm -f "./input/${{ github.event.inputs.input_file }}"
+        echo "Removing output directory..."
+        rm -rf $OUTPUT_DIR
 
     - name: Commit changes
       run: |
         git config --local user.name "github-actions"
         git config --local user.email "github-actions@github.com"
-        git add "./input/${{ github.event.inputs.input_file }}"
-        git commit -m "Delete input file"
+        git add -A
+        git commit -m "Processed files [output removed]" || echo "No changes to commit"
         git push
