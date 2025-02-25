@@ -92,5 +92,5 @@ jobs:
         git config --local user.name "github-actions"
         git config --local user.email "github-actions@github.com"
         git add -A
-        git commit -m "Processed files [output removed]" || echo "No changes to commit"
+        git commit -m "Clear Input" || echo "No changes to commit"
         git push
