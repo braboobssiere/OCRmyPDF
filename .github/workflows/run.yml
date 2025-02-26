@@ -33,9 +33,7 @@ jobs:
             sudo apt-get install -y "tesseract-ocr-$lang_code"
           done
         fi
-
-    - name: Prepare directories
-      run: |
+        # Prepare directories
         mkdir -p $OUTPUT_DIR
         [ -d $INPUT_DIR ] || mkdir $INPUT_DIR
 
