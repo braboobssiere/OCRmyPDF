@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'URL to PDF or image file'
+        description: 'URL to PDF/image file (leave blank to use file from input)'
         required: false
       additional_param:
         description: 'Additional OCR parameters'
