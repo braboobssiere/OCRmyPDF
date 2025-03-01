@@ -3,6 +3,9 @@ name: Process Multiple Files with OCRmyPDF
 on:
   workflow_dispatch:
     inputs:
+      url:
+        description: 'URL to PDF or image file'
+        required: false
       additional_param:
         description: 'Additional OCR parameters'
         required: false
@@ -25,7 +28,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ocrmypdf tesseract-ocr
+        sudo apt-get install -y ocrmypdf tesseract-ocr curl
         lang_codes=$(echo "${{ github.event.inputs.additional_param }}" | sed -n 's/.*-l[[:space:]]*\([a-zA-Z]\{3\}\([+][a-zA-Z]\{3\}\)*\)\b.*/\1/p')
         if [ -n "$lang_codes" ]; then
           for lang_code in $(echo "$lang_codes" | tr '+' ' '); do
@@ -33,11 +36,56 @@ jobs:
             sudo apt-get install -y "tesseract-ocr-$lang_code"
           done
         fi
-        # Prepare directories
         mkdir -p $OUTPUT_DIR
-        [ -d $INPUT_DIR ] || mkdir $INPUT_DIR
+        # Only create input dir if not using URL
+        if [ -z "${{ github.event.inputs.url }}" ]; then
+          [ -d $INPUT_DIR ] || mkdir $INPUT_DIR
+        fi
 
-    - name: Process files
+    - name: Process URL input
+      if: ${{ github.event.inputs.url }}
+      run: |
+        set -eo pipefail
+        DOWNLOAD_DIR="./temp_download"
+        mkdir -p "$DOWNLOAD_DIR"
+        
+        # Extract filename from URL
+        url="${{ github.event.inputs.url }}"
+        filename=$(basename "${url%%\?*}")
+        filepath="$DOWNLOAD_DIR/$filename"
+        
+        # Download file
+        curl -L -o "$filepath" "$url"
+        
+        # Process file
+        timestamp=$(date +"%Y%m%d_%H%M%S")
+        extension="${filename##*.}"
+        success=false
+        
+        if [[ "${extension,,}" =~ ^(jpg|jpeg|png|tiff|bmp)$ ]]; then
+          output_base="$OUTPUT_DIR/${filename%.*}_$timestamp"
+          if tesseract ${{ github.event.inputs.additional_param }} "$filepath" "$output_base" pdf txt; then
+            success=true
+          fi
+        elif [[ "${extension,,}" == "pdf" ]]; then
+          output_pdf="$OUTPUT_DIR/${filename%.*}_$timestamp.pdf"
+          if ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean \
+            --sidecar "${output_pdf}.txt" "$filepath" "$output_pdf"; then
+            success=true
+          fi
+        else
+          echo "Unsupported file type: $extension"
+          exit 1
+        fi
+        
+        if [ "$success" = false ]; then
+          echo "Failed to process URL file"
+          exit 1
+        fi
+        rm -rf "$DOWNLOAD_DIR"
+
+    - name: Process local files
+      if: ${{ !github.event.inputs.url }}
       run: |
         set -eo pipefail
         while IFS= read -rd '' file; do
@@ -46,14 +94,11 @@ jobs:
           success=false
           timestamp=$(date +"%Y%m%d_%H%M%S")
 
-          # Process images
           if [[ "${extension,,}" =~ ^(jpg|jpeg|png|tiff|bmp)$ ]]; then
             output_base="$OUTPUT_DIR/${filename%.*}_$timestamp"
             if tesseract ${{ github.event.inputs.additional_param }} "$file" "$output_base" pdf txt; then
               success=true
             fi
-
-          # Process PDFs
           elif [[ "${extension,,}" == "pdf" ]]; then
             output_pdf="$OUTPUT_DIR/${filename%.*}_$timestamp.pdf"
             if ocrmypdf ${{ github.event.inputs.additional_param }} --skip-text --clean \
@@ -63,7 +108,6 @@ jobs:
           fi
 
           if [ "$success" = true ]; then
-            # Remove original file from both filesystem and git index
             git rm -f --ignore-unmatch "$file"
             rm -f "$file"
             echo "Processed: $filename"
@@ -82,10 +126,10 @@ jobs:
 
     - name: Delete output directory
       run: |
-        echo "Removing output directory..."
         rm -rf $OUTPUT_DIR
 
     - name: Commit changes
+      if: ${{ !github.event.inputs.url }}
       run: |
         git config --local user.name "github-actions"
         git config --local user.email "github-actions@github.com"
